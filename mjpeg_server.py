@@ -17,8 +17,11 @@ from watchdog.observers import Observer
 # =============================================================================
 # Configuration (edit here)
 # =============================================================================
-FRAMES_DIR_ABS: str = "/home/alexios/Projects/mjpeg_http_streamer/images"  # <-- set your directory here
+FRAMES_DIR_ABS: str = "/home/alexios/Projects/mjpeg_http_streamer/images"
 TARGET_FPS: float = 20.0
+
+# Delete frames older than (current_frame_mtime - MAX_FRAME_AGE_S)
+MAX_FRAME_AGE_S: float = 10.0
 
 
 # =============================================================================
@@ -29,9 +32,10 @@ class LatestFrame:
     lock: threading.Lock
     jpeg_bytes: bytes
     seq: int
+    path: Optional[Path]
 
 
-latest = LatestFrame(lock=threading.Lock(), jpeg_bytes=b"", seq=0)
+latest = LatestFrame(lock=threading.Lock(), jpeg_bytes=b"", seq=0, path=None)
 
 
 def _is_candidate_image(path: Path) -> bool:
@@ -52,7 +56,7 @@ def _try_load_as_jpeg_bytes(path: Path, max_attempts: int = 5, sleep_s: float = 
             from io import BytesIO
             bio_in = BytesIO(raw)
             img = Image.open(bio_in)
-            img.load()  # force decode, raises on truncated/corrupt
+            img.load()
 
             bio_out = BytesIO()
             img.save(bio_out, format="JPEG", quality=85, optimize=True)
@@ -63,10 +67,49 @@ def _try_load_as_jpeg_bytes(path: Path, max_attempts: int = 5, sleep_s: float = 
     return None
 
 
-def _update_latest(jpeg: bytes) -> None:
+def prune_older_than_current(folder: Path, current_path: Optional[Path], max_age_s: float) -> None:
+    """
+    Delete images older than (mtime(current_path) - max_age_s).
+
+    Rationale:
+    - Works well for near real-time MJPEG: keep only a short temporal window.
+    - Independent from number of connected clients.
+    - Best-effort deletion: failures do not affect streaming.
+
+    Notes:
+    - Uses filesystem mtime as time base (producer should write with "now-ish" mtime).
+    - If current_path is None or missing, nothing is deleted.
+    """
+    if (current_path is None) or (max_age_s <= 0.0):
+        return
+
+    try:
+        current_mtime = current_path.stat().st_mtime
+    except FileNotFoundError:
+        return
+    except Exception:
+        return
+
+    threshold = current_mtime - max_age_s
+
+    for p in folder.iterdir():
+        if (not p.is_file()) or (not _is_candidate_image(p)):
+            continue
+        try:
+            if p.stat().st_mtime < threshold:
+                p.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            # Best-effort: ignore any transient filesystem issues
+            pass
+
+
+def _update_latest(jpeg: bytes, path: Path) -> None:
     with latest.lock:
         latest.jpeg_bytes = jpeg
         latest.seq += 1
+        latest.path = path
 
 
 # =============================================================================
@@ -83,13 +126,11 @@ class NewImageHandler(FileSystemEventHandler):
         self._handle(Path(event.src_path))
 
     def on_moved(self, event) -> None:
-        # Useful if producer writes to temp file then atomically renames.
         if getattr(event, "is_directory", False):
             return
         self._handle(Path(event.dest_path))
 
     def on_modified(self, event) -> None:
-        # Optional: helps if producer writes in place.
         if event.is_directory:
             return
         self._handle(Path(event.src_path))
@@ -104,7 +145,10 @@ class NewImageHandler(FileSystemEventHandler):
 
         jpeg = _try_load_as_jpeg_bytes(path)
         if jpeg is not None:
-            _update_latest(jpeg)
+            _update_latest(jpeg, path)
+
+            # Prune old frames relative to the *current* one
+            prune_older_than_current(self._folder, path, MAX_FRAME_AGE_S)
 
 
 def _start_watcher(folder: Path) -> Observer:
@@ -125,12 +169,11 @@ app = FastAPI()
 def _startup() -> None:
     folder = Path(FRAMES_DIR_ABS)
 
-    # Hard requirement: directory must exist already, otherwise exit immediately.
     if (not folder.exists()) or (not folder.is_dir()):
         print(f"ERROR: FRAMES_DIR_ABS does not exist or is not a directory: {folder}", file=sys.stderr)
         raise SystemExit(1)
 
-    # Bootstrap: load the newest existing frame by mtime if any
+    # Bootstrap: load newest existing frame
     candidates = sorted(
         (p for p in folder.iterdir() if p.is_file() and _is_candidate_image(p)),
         key=lambda p: p.stat().st_mtime,
@@ -139,7 +182,10 @@ def _startup() -> None:
     if candidates:
         jpeg = _try_load_as_jpeg_bytes(candidates[0])
         if jpeg is not None:
-            _update_latest(jpeg)
+            _update_latest(jpeg, candidates[0])
+
+        # Startup prune relative to newest frame
+        prune_older_than_current(folder, candidates[0], MAX_FRAME_AGE_S)
 
     app.state.folder = folder
     app.state.observer = _start_watcher(folder)
@@ -157,9 +203,14 @@ def _mjpeg_generator(target_fps: float) -> Generator[bytes, None, None]:
     header_ct = b"Content-Type: image/jpeg\r\n"
     frame_interval = 1.0 / target_fps if target_fps > 0.0 else 0.05
 
+    # Optional: periodic prune even if watchdog misses events
+    prune_every_n: int = 20
+    i: int = 0
+
     while True:
         with latest.lock:
             jpeg = latest.jpeg_bytes
+            path = latest.path
 
         if jpeg:
             part = (
@@ -170,6 +221,15 @@ def _mjpeg_generator(target_fps: float) -> Generator[bytes, None, None]:
                 + b"\r\n"
             )
             yield part
+
+        i += 1
+        if (i % prune_every_n) == 0:
+            try:
+                folder = app.state.folder
+            except Exception:
+                folder = None
+            if folder is not None:
+                prune_older_than_current(folder, path, MAX_FRAME_AGE_S)
 
         time.sleep(frame_interval)
 
