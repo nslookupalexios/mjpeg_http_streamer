@@ -7,8 +7,8 @@ set -euo pipefail
 # =============================================================================
 INPUT_MP4="$1"
 OUTPUT_DIR="$2"
-FPS="${3:-20}"          # default 20 fps
-JPEG_QUALITY="${4:-2}"  # ffmpeg scale: 2 = high quality, 31 = low quality
+FPS="${3:-20}"                # default 20 fps
+PNG_COMPRESSION="${4:-6}"     # ffmpeg scale: 0 = no compression, 9 = max compression
 
 # =============================================================================
 # Checks
@@ -30,7 +30,7 @@ ffmpeg -loglevel error \
        -re \
        -i "$INPUT_MP4" \
        -vf "fps=${FPS}" \
-       -q:v "${JPEG_QUALITY}" \
-       "${OUTPUT_DIR}/frame_%06d.jpg"
+       -compression_level "${PNG_COMPRESSION}" \
+       "${OUTPUT_DIR}/frame_%06d.png"
 
 echo "Done. Frames written to: $OUTPUT_DIR"
