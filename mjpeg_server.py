@@ -13,15 +13,17 @@ from PIL import Image
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+import os
+
+
 
 # =============================================================================
-# Configuration (edit here)
+# Configuration
 # =============================================================================
-FRAMES_DIR_ABS: str = "/home/alexios/Projects/mjpeg_http_streamer/images"
-TARGET_FPS: float = 20.0
+FRAMES_DIR_ABS: str = os.getenv("FRAMES_DIR_ABS", "/tmp/mjpeg_frames")
+TARGET_FPS: float = float(os.getenv("TARGET_FPS", "20.0"))
+MAX_FRAME_AGE_S: float = float(os.getenv("MAX_FRAME_AGE_S", "10.0"))
 
-# Delete frames older than (current_frame_mtime - MAX_FRAME_AGE_S)
-MAX_FRAME_AGE_S: float = 10.0
 
 # Placeholder frame resolution (shown when no real frames exist yet)
 NO_FRAME_WIDTH: int = 640
