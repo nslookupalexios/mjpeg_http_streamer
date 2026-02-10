@@ -6,10 +6,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Generator, Optional
-
+from io import BytesIO
+from PIL import Image
 from fastapi import FastAPI, Response
 from fastapi.responses import StreamingResponse
-from PIL import Image
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
@@ -46,23 +46,33 @@ latest = LatestFrame(lock=threading.Lock(), jpeg_bytes=b"", seq=0, path=None)
 
 def _is_candidate_image(path: Path) -> bool:
     suffix = path.suffix.lower()
-    return (suffix == ".jpg") or (suffix == ".jpeg")
+    return (suffix == ".jpg") or (suffix == ".jpeg") or (suffix == ".png")
 
 
 def _try_load_as_jpeg_bytes(path: Path, max_attempts: int = 5, sleep_s: float = 0.02) -> Optional[bytes]:
     """
     Defensive load to handle partially written files.
-    Reads the file, validates by decoding, then re-encodes to JPEG for consistency.
+    Reads the file, validates by decoding, then re-encodes to JPEG for streaming consistency.
+    Supports JPEG and PNG inputs; PNG with alpha is composited to RGB.
     """
+
     for _ in range(max_attempts):
         try:
             with path.open("rb") as f:
                 raw = f.read()
 
-            from io import BytesIO
             bio_in = BytesIO(raw)
             img = Image.open(bio_in)
             img.load()  # force decode, raises on truncated/corrupt
+
+            # Ensure JPEG-compatible mode (no alpha)
+            if img.mode in ("RGBA", "LA"):
+                background = Image.new("RGB", img.size, (0, 0, 0))  # choose background color
+                alpha = img.split()[-1]
+                background.paste(img.convert("RGB"), mask=alpha)
+                img = background
+            elif img.mode != "RGB":
+                img = img.convert("RGB")
 
             bio_out = BytesIO()
             img.save(bio_out, format="JPEG", quality=85, optimize=True)
