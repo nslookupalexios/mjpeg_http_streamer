@@ -23,6 +23,10 @@ TARGET_FPS: float = 20.0
 # Delete frames older than (current_frame_mtime - MAX_FRAME_AGE_S)
 MAX_FRAME_AGE_S: float = 10.0
 
+# Placeholder frame resolution (shown when no real frames exist yet)
+NO_FRAME_WIDTH: int = 640
+NO_FRAME_HEIGHT: int = 480
+
 
 # =============================================================================
 # Shared state (latest JPEG)
@@ -56,7 +60,7 @@ def _try_load_as_jpeg_bytes(path: Path, max_attempts: int = 5, sleep_s: float = 
             from io import BytesIO
             bio_in = BytesIO(raw)
             img = Image.open(bio_in)
-            img.load()
+            img.load()  # force decode, raises on truncated/corrupt
 
             bio_out = BytesIO()
             img.save(bio_out, format="JPEG", quality=85, optimize=True)
@@ -67,18 +71,63 @@ def _try_load_as_jpeg_bytes(path: Path, max_attempts: int = 5, sleep_s: float = 
     return None
 
 
+def _generate_no_frame_jpeg(width: int, height: int, text: str = "NO FRAME") -> bytes:
+    """
+    Generate an in-memory JPEG placeholder with large white text on black background.
+    Used when no real frames are available.
+
+    Implementation notes:
+    - Uses a TrueType font (DejaVu Sans) with explicit size.
+    - Falls back to default bitmap font if TTF is unavailable.
+    - Text is centered both horizontally and vertically.
+    """
+    from io import BytesIO
+    from PIL import ImageDraw, ImageFont
+
+    img = Image.new("RGB", (width, height), color=(0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Font size proportional to image height (e.g. 15%)
+    font_size = max(24, int(height * 0.15))
+
+    try:
+        font = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            font_size,
+        )
+    except Exception:
+        # Fallback: small bitmap font (should never happen on Ubuntu)
+        font = ImageFont.load_default()
+
+    try:
+        # Preferred for TrueType fonts
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+    except Exception:
+        # Safe fallback
+        (text_w, text_h) = draw.textsize(text, font=font)
+
+    pos = ((width - text_w) // 2, (height - text_h) // 2)
+    draw.text(pos, text, fill=(255, 255, 255), font=font)
+
+    bio = BytesIO()
+    img.save(bio, format="JPEG", quality=85, optimize=True)
+    return bio.getvalue()
+
+
+# Compute once; safe after fixing text size calculation
+NO_FRAME_JPEG: bytes = _generate_no_frame_jpeg(NO_FRAME_WIDTH, NO_FRAME_HEIGHT)
+
+
 def prune_older_than_current(folder: Path, current_path: Optional[Path], max_age_s: float) -> None:
     """
     Delete images older than (mtime(current_path) - max_age_s).
 
-    Rationale:
-    - Works well for near real-time MJPEG: keep only a short temporal window.
-    - Independent from number of connected clients.
-    - Best-effort deletion: failures do not affect streaming.
-
     Notes:
-    - Uses filesystem mtime as time base (producer should write with "now-ish" mtime).
+    - Uses filesystem mtime as time base.
     - If current_path is None or missing, nothing is deleted.
+    - Best-effort deletion: failures do not affect streaming.
     """
     if (current_path is None) or (max_age_s <= 0.0):
         return
@@ -101,7 +150,6 @@ def prune_older_than_current(folder: Path, current_path: Optional[Path], max_age
         except FileNotFoundError:
             pass
         except Exception:
-            # Best-effort: ignore any transient filesystem issues
             pass
 
 
@@ -126,11 +174,13 @@ class NewImageHandler(FileSystemEventHandler):
         self._handle(Path(event.src_path))
 
     def on_moved(self, event) -> None:
+        # Useful if producer writes to temp file then atomically renames.
         if getattr(event, "is_directory", False):
             return
         self._handle(Path(event.dest_path))
 
     def on_modified(self, event) -> None:
+        # Optional: helps if producer writes in place.
         if event.is_directory:
             return
         self._handle(Path(event.src_path))
@@ -146,8 +196,6 @@ class NewImageHandler(FileSystemEventHandler):
         jpeg = _try_load_as_jpeg_bytes(path)
         if jpeg is not None:
             _update_latest(jpeg, path)
-
-            # Prune old frames relative to the *current* one
             prune_older_than_current(self._folder, path, MAX_FRAME_AGE_S)
 
 
@@ -169,11 +217,19 @@ app = FastAPI()
 def _startup() -> None:
     folder = Path(FRAMES_DIR_ABS)
 
-    if (not folder.exists()) or (not folder.is_dir()):
-        print(f"ERROR: FRAMES_DIR_ABS does not exist or is not a directory: {folder}", file=sys.stderr)
+    # If path exists but is not a directory -> unrecoverable configuration error
+    if folder.exists() and (not folder.is_dir()):
+        print(f"ERROR: FRAMES_DIR_ABS exists but is not a directory: {folder}", file=sys.stderr)
         raise SystemExit(1)
 
-    # Bootstrap: load newest existing frame
+    # If directory does not exist -> create it and continue
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        print(f"ERROR: cannot create/access FRAMES_DIR_ABS directory: {folder} ({e})", file=sys.stderr)
+        raise SystemExit(1)
+
+    # Bootstrap: load newest existing frame (may be empty -> ok)
     candidates = sorted(
         (p for p in folder.iterdir() if p.is_file() and _is_candidate_image(p)),
         key=lambda p: p.stat().st_mtime,
@@ -183,8 +239,6 @@ def _startup() -> None:
         jpeg = _try_load_as_jpeg_bytes(candidates[0])
         if jpeg is not None:
             _update_latest(jpeg, candidates[0])
-
-        # Startup prune relative to newest frame
         prune_older_than_current(folder, candidates[0], MAX_FRAME_AGE_S)
 
     app.state.folder = folder
@@ -203,7 +257,7 @@ def _mjpeg_generator(target_fps: float) -> Generator[bytes, None, None]:
     header_ct = b"Content-Type: image/jpeg\r\n"
     frame_interval = 1.0 / target_fps if target_fps > 0.0 else 0.05
 
-    # Optional: periodic prune even if watchdog misses events
+    # Periodic prune even if watchdog misses events
     prune_every_n: int = 20
     i: int = 0
 
@@ -212,22 +266,20 @@ def _mjpeg_generator(target_fps: float) -> Generator[bytes, None, None]:
             jpeg = latest.jpeg_bytes
             path = latest.path
 
-        if jpeg:
-            part = (
-                boundary
-                + header_ct
-                + f"Content-Length: {len(jpeg)}\r\n\r\n".encode("ascii")
-                + jpeg
-                + b"\r\n"
-            )
-            yield part
+        frame = jpeg if jpeg else NO_FRAME_JPEG
+
+        part = (
+            boundary
+            + header_ct
+            + f"Content-Length: {len(frame)}\r\n\r\n".encode("ascii")
+            + frame
+            + b"\r\n"
+        )
+        yield part
 
         i += 1
         if (i % prune_every_n) == 0:
-            try:
-                folder = app.state.folder
-            except Exception:
-                folder = None
+            folder = getattr(app.state, "folder", None)
             if folder is not None:
                 prune_older_than_current(folder, path, MAX_FRAME_AGE_S)
 
