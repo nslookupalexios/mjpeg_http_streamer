@@ -146,16 +146,16 @@ upsert_env_kv "${ENV_FILE}" "PYTHON_BIN" "${PY_VENV_BIN}"
 upsert_env_kv "${ENV_FILE}" "UVICORN_BIN" "${UVICORN_BIN}"
 
 # Defaults for frames directories if not set
-if grep -qE "^FRAMES_DIR1_ABS=$" "${ENV_FILE}"; then
-  upsert_env_kv "${ENV_FILE}" "FRAMES_DIR1_ABS" "${PROJECT_DIR}/images1"
+if grep -qE "^FRAMES_OJBECT_DIR_ABS=$" "${ENV_FILE}"; then
+  upsert_env_kv "${ENV_FILE}" "FRAMES_OJBECT_DIR_ABS" "${PROJECT_DIR}/images1"
 fi
-if grep -qE "^FRAMES_DIR2_ABS=$" "${ENV_FILE}"; then
-  upsert_env_kv "${ENV_FILE}" "FRAMES_DIR2_ABS" "${PROJECT_DIR}/images2"
+if grep -qE "^FRAMES_ROCK_DIR_ABS=$" "${ENV_FILE}"; then
+  upsert_env_kv "${ENV_FILE}" "FRAMES_ROCK_DIR_ABS" "${PROJECT_DIR}/images2"
 fi
 
 # Ensure frames directories exist (user-space)
-FRAMES_DIR1="$(read_env_kv "${ENV_FILE}" "FRAMES_DIR1_ABS")"
-FRAMES_DIR2="$(read_env_kv "${ENV_FILE}" "FRAMES_DIR2_ABS")"
+FRAMES_DIR1="$(read_env_kv "${ENV_FILE}" "FRAMES_OJBECT_DIR_ABS")"
+FRAMES_DIR2="$(read_env_kv "${ENV_FILE}" "FRAMES_ROCK_DIR_ABS")"
 
 if [[ -n "${FRAMES_DIR1}" ]]; then
   mkdir -p "${FRAMES_DIR1}" || true

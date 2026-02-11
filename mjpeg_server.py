@@ -19,8 +19,8 @@ import os
 # =============================================================================
 # Configuration
 # =============================================================================
-FRAMES_DIR1_ABS: str = os.getenv("FRAMES_DIR1_ABS", "/tmp/mjpeg_frames1")
-FRAMES_DIR2_ABS: str = os.getenv("FRAMES_DIR2_ABS", "/tmp/mjpeg_frames2")
+FRAMES_OJBECT_DIR_ABS: str = os.getenv("FRAMES_OJBECT_DIR_ABS", "/tmp/mjpeg_frames1")
+FRAMES_ROCK_DIR_ABS: str = os.getenv("FRAMES_ROCK_DIR_ABS", "/tmp/mjpeg_frames2")
 
 TARGET_FPS: float = float(os.getenv("TARGET_FPS", "20.0"))
 MAX_FRAME_AGE_S: float = float(os.getenv("MAX_FRAME_AGE_S", "10.0"))
@@ -225,10 +225,10 @@ app = FastAPI()
 
 @app.on_event("startup")
 def _startup() -> None:
-    folder1 = Path(FRAMES_DIR1_ABS)
-    folder2 = Path(FRAMES_DIR2_ABS)
+    folder1 = Path(FRAMES_OJBECT_DIR_ABS)
+    folder2 = Path(FRAMES_ROCK_DIR_ABS)
 
-    for folder, name in ((folder1, "FRAMES_DIR1_ABS"), (folder2, "FRAMES_DIR2_ABS")):
+    for folder, name in ((folder1, "FRAMES_OJBECT_DIR_ABS"), (folder2, "FRAMES_ROCK_DIR_ABS")):
         if folder.exists() and (not folder.is_dir()):
             print(f"ERROR: {name} exists but is not a directory: {folder}", file=sys.stderr)
             raise SystemExit(1)
