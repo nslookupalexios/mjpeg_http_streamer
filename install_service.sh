@@ -22,7 +22,6 @@ need_sudo() {
     err "sudo is required but not installed."
     exit 1
   fi
-  # Ask once; will cache credentials for subsequent sudo calls.
   if ! sudo -v; then
     err "sudo authentication failed."
     exit 1
@@ -41,6 +40,15 @@ upsert_env_kv() {
   fi
 }
 
+# Read KEY= from env file (first match), returns empty if missing
+read_env_kv() {
+  local file="$1"
+  local key="$2"
+  local val=""
+  val="$(grep -E "^${key}=" "${file}" 2>/dev/null | head -n1 | cut -d= -f2- || true)"
+  echo "${val}"
+}
+
 # ---------------------------
 # Preconditions (must run as regular user)
 # ---------------------------
@@ -57,8 +65,6 @@ need_cmd python3
 
 PROJECT_DIR="$(dirname "$(readlink -f "$0")")"
 INVOKING_USER="$(id -un)"
-INVOKING_UID="$(id -u)"
-INVOKING_GID="$(id -g)"
 INVOKING_HOME="$(getent passwd "$INVOKING_USER" | cut -d: -f6)"
 if [[ -z "${INVOKING_HOME}" ]]; then
   err "Cannot determine home directory for user: ${INVOKING_USER}"
@@ -76,7 +82,6 @@ log "Installing system dependencies (apt)..."
 need_sudo
 sudo apt-get update -y
 
-# Pillow runtime deps and fonts; python tooling
 sudo apt-get install -y \
   python3 \
   python3-venv \
@@ -140,16 +145,23 @@ upsert_env_kv "${ENV_FILE}" "VENV_DIR" "${VENV_DIR}"
 upsert_env_kv "${ENV_FILE}" "PYTHON_BIN" "${PY_VENV_BIN}"
 upsert_env_kv "${ENV_FILE}" "UVICORN_BIN" "${UVICORN_BIN}"
 
-# Default frames directory if not set
-# If FRAMES_DIR_ABS is empty, set to <project>/images
-if grep -qE "^FRAMES_DIR_ABS=$" "${ENV_FILE}"; then
-  upsert_env_kv "${ENV_FILE}" "FRAMES_DIR_ABS" "${PROJECT_DIR}/images"
+# Defaults for frames directories if not set
+if grep -qE "^FRAMES_DIR1_ABS=$" "${ENV_FILE}"; then
+  upsert_env_kv "${ENV_FILE}" "FRAMES_DIR1_ABS" "${PROJECT_DIR}/images1"
+fi
+if grep -qE "^FRAMES_DIR2_ABS=$" "${ENV_FILE}"; then
+  upsert_env_kv "${ENV_FILE}" "FRAMES_DIR2_ABS" "${PROJECT_DIR}/images2"
 fi
 
-# Ensure images directory exists (user-space)
-FRAMES_DIR="$(grep -E '^FRAMES_DIR_ABS=' "${ENV_FILE}" | head -n1 | cut -d= -f2-)"
-if [[ -n "${FRAMES_DIR}" ]]; then
-  mkdir -p "${FRAMES_DIR}" || true
+# Ensure frames directories exist (user-space)
+FRAMES_DIR1="$(read_env_kv "${ENV_FILE}" "FRAMES_DIR1_ABS")"
+FRAMES_DIR2="$(read_env_kv "${ENV_FILE}" "FRAMES_DIR2_ABS")"
+
+if [[ -n "${FRAMES_DIR1}" ]]; then
+  mkdir -p "${FRAMES_DIR1}" || true
+fi
+if [[ -n "${FRAMES_DIR2}" ]]; then
+  mkdir -p "${FRAMES_DIR2}" || true
 fi
 
 # ---------------------------
@@ -160,10 +172,9 @@ SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 log "Installing systemd unit: ${SERVICE_PATH}"
 need_sudo
 
-# Read required config values from ENV_FILE (best-effort defaults)
-APP_MODULE="$(grep -E '^APP_MODULE=' "${ENV_FILE}" | head -n1 | cut -d= -f2-)"
-HOST="$(grep -E '^HOST=' "${ENV_FILE}" | head -n1 | cut -d= -f2-)"
-PORT="$(grep -E '^PORT=' "${ENV_FILE}" | head -n1 | cut -d= -f2-)"
+APP_MODULE="$(read_env_kv "${ENV_FILE}" "APP_MODULE")"
+HOST="$(read_env_kv "${ENV_FILE}" "HOST")"
+PORT="$(read_env_kv "${ENV_FILE}" "PORT")"
 
 if [[ -z "${APP_MODULE}" ]]; then APP_MODULE="mjpeg_server:app"; fi
 if [[ -z "${HOST}" ]]; then HOST="0.0.0.0"; fi
@@ -171,7 +182,7 @@ if [[ -z "${PORT}" ]]; then PORT="8000"; fi
 
 sudo tee "${SERVICE_PATH}" >/dev/null <<EOF
 [Unit]
-Description=MJPEG FastAPI/Uvicorn streamer (env-driven)
+Description=MJPEG FastAPI/Uvicorn streamer (env-driven, dual source)
 After=network-online.target
 Wants=network-online.target
 
@@ -194,10 +205,6 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
-
-# Replace placeholders (root-owned file => use sudo)
-sudo sed -i "s|__ENV_FILE__|${ENV_FILE}|g" "${SERVICE_PATH}"
-sudo sed -i "s|__RUN_AS_USER__|${INVOKING_USER}|g" "${SERVICE_PATH}"
 
 # ---------------------------
 # 5) Enable & start (root-required)

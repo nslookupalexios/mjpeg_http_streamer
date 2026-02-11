@@ -4,34 +4,33 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Generator, Optional
-from io import BytesIO
-from PIL import Image
+
 from fastapi import FastAPI, Response
 from fastapi.responses import StreamingResponse
+from PIL import Image
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 import os
 
-
-
 # =============================================================================
 # Configuration
 # =============================================================================
-FRAMES_DIR_ABS: str = os.getenv("FRAMES_DIR_ABS", "/tmp/mjpeg_frames")
+FRAMES_DIR1_ABS: str = os.getenv("FRAMES_DIR1_ABS", "/tmp/mjpeg_frames1")
+FRAMES_DIR2_ABS: str = os.getenv("FRAMES_DIR2_ABS", "/tmp/mjpeg_frames2")
+
 TARGET_FPS: float = float(os.getenv("TARGET_FPS", "20.0"))
 MAX_FRAME_AGE_S: float = float(os.getenv("MAX_FRAME_AGE_S", "10.0"))
-
 
 # Placeholder frame resolution (shown when no real frames exist yet)
 NO_FRAME_WIDTH: int = 640
 NO_FRAME_HEIGHT: int = 480
 
-
 # =============================================================================
-# Shared state (latest JPEG)
+# Shared state (latest JPEG) - one per source
 # =============================================================================
 @dataclass
 class LatestFrame:
@@ -41,7 +40,8 @@ class LatestFrame:
     path: Optional[Path]
 
 
-latest = LatestFrame(lock=threading.Lock(), jpeg_bytes=b"", seq=0, path=None)
+latest1 = LatestFrame(lock=threading.Lock(), jpeg_bytes=b"", seq=0, path=None)
+latest2 = LatestFrame(lock=threading.Lock(), jpeg_bytes=b"", seq=0, path=None)
 
 
 def _is_candidate_image(path: Path) -> bool:
@@ -55,7 +55,6 @@ def _try_load_as_jpeg_bytes(path: Path, max_attempts: int = 5, sleep_s: float = 
     Reads the file, validates by decoding, then re-encodes to JPEG for streaming consistency.
     Supports JPEG and PNG inputs; PNG with alpha is composited to RGB.
     """
-
     for _ in range(max_attempts):
         try:
             with path.open("rb") as f:
@@ -63,11 +62,11 @@ def _try_load_as_jpeg_bytes(path: Path, max_attempts: int = 5, sleep_s: float = 
 
             bio_in = BytesIO(raw)
             img = Image.open(bio_in)
-            img.load()  # force decode, raises on truncated/corrupt
+            img.load()
 
             # Ensure JPEG-compatible mode (no alpha)
             if img.mode in ("RGBA", "LA"):
-                background = Image.new("RGB", img.size, (0, 0, 0))  # choose background color
+                background = Image.new("RGB", img.size, (0, 0, 0))
                 alpha = img.split()[-1]
                 background.paste(img.convert("RGB"), mask=alpha)
                 img = background
@@ -86,20 +85,12 @@ def _try_load_as_jpeg_bytes(path: Path, max_attempts: int = 5, sleep_s: float = 
 def _generate_no_frame_jpeg(width: int, height: int, text: str = "NO FRAME") -> bytes:
     """
     Generate an in-memory JPEG placeholder with large white text on black background.
-    Used when no real frames are available.
-
-    Implementation notes:
-    - Uses a TrueType font (DejaVu Sans) with explicit size.
-    - Falls back to default bitmap font if TTF is unavailable.
-    - Text is centered both horizontally and vertically.
     """
-    from io import BytesIO
     from PIL import ImageDraw, ImageFont
 
     img = Image.new("RGB", (width, height), color=(0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # Font size proportional to image height (e.g. 15%)
     font_size = max(24, int(height * 0.15))
 
     try:
@@ -108,16 +99,13 @@ def _generate_no_frame_jpeg(width: int, height: int, text: str = "NO FRAME") -> 
             font_size,
         )
     except Exception:
-        # Fallback: small bitmap font (should never happen on Ubuntu)
         font = ImageFont.load_default()
 
     try:
-        # Preferred for TrueType fonts
         bbox = draw.textbbox((0, 0), text, font=font)
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
     except Exception:
-        # Safe fallback
         (text_w, text_h) = draw.textsize(text, font=font)
 
     pos = ((width - text_w) // 2, (height - text_h) // 2)
@@ -128,18 +116,13 @@ def _generate_no_frame_jpeg(width: int, height: int, text: str = "NO FRAME") -> 
     return bio.getvalue()
 
 
-# Compute once; safe after fixing text size calculation
 NO_FRAME_JPEG: bytes = _generate_no_frame_jpeg(NO_FRAME_WIDTH, NO_FRAME_HEIGHT)
 
 
 def prune_older_than_current(folder: Path, current_path: Optional[Path], max_age_s: float) -> None:
     """
     Delete images older than (mtime(current_path) - max_age_s).
-
-    Notes:
-    - Uses filesystem mtime as time base.
-    - If current_path is None or missing, nothing is deleted.
-    - Best-effort deletion: failures do not affect streaming.
+    Best-effort deletion: failures do not affect streaming.
     """
     if (current_path is None) or (max_age_s <= 0.0):
         return
@@ -165,7 +148,7 @@ def prune_older_than_current(folder: Path, current_path: Optional[Path], max_age
             pass
 
 
-def _update_latest(jpeg: bytes, path: Path) -> None:
+def _update_latest(latest: LatestFrame, jpeg: bytes, path: Path) -> None:
     with latest.lock:
         latest.jpeg_bytes = jpeg
         latest.seq += 1
@@ -173,12 +156,13 @@ def _update_latest(jpeg: bytes, path: Path) -> None:
 
 
 # =============================================================================
-# Watchdog handler
+# Watchdog handler (parametric on "latest")
 # =============================================================================
 class NewImageHandler(FileSystemEventHandler):
-    def __init__(self, folder: Path) -> None:
+    def __init__(self, folder: Path, latest: LatestFrame) -> None:
         super().__init__()
         self._folder = folder
+        self._latest = latest
 
     def on_created(self, event) -> None:
         if event.is_directory:
@@ -186,13 +170,11 @@ class NewImageHandler(FileSystemEventHandler):
         self._handle(Path(event.src_path))
 
     def on_moved(self, event) -> None:
-        # Useful if producer writes to temp file then atomically renames.
         if getattr(event, "is_directory", False):
             return
         self._handle(Path(event.dest_path))
 
     def on_modified(self, event) -> None:
-        # Optional: helps if producer writes in place.
         if event.is_directory:
             return
         self._handle(Path(event.src_path))
@@ -207,16 +189,32 @@ class NewImageHandler(FileSystemEventHandler):
 
         jpeg = _try_load_as_jpeg_bytes(path)
         if jpeg is not None:
-            _update_latest(jpeg, path)
+            _update_latest(self._latest, jpeg, path)
             prune_older_than_current(self._folder, path, MAX_FRAME_AGE_S)
 
 
-def _start_watcher(folder: Path) -> Observer:
-    handler = NewImageHandler(folder)
+def _start_watcher(folder: Path, latest: LatestFrame) -> Observer:
+    handler = NewImageHandler(folder, latest)
     observer = Observer()
     observer.schedule(handler, str(folder), recursive=False)
     observer.start()
     return observer
+
+
+def _bootstrap_folder(folder: Path, latest: LatestFrame) -> None:
+    """
+    Load newest existing frame from folder (if any) and prune older frames.
+    """
+    candidates = sorted(
+        (p for p in folder.iterdir() if p.is_file() and _is_candidate_image(p)),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if candidates:
+        jpeg = _try_load_as_jpeg_bytes(candidates[0])
+        if jpeg is not None:
+            _update_latest(latest, jpeg, candidates[0])
+        prune_older_than_current(folder, candidates[0], MAX_FRAME_AGE_S)
 
 
 # =============================================================================
@@ -227,49 +225,49 @@ app = FastAPI()
 
 @app.on_event("startup")
 def _startup() -> None:
-    folder = Path(FRAMES_DIR_ABS)
+    folder1 = Path(FRAMES_DIR1_ABS)
+    folder2 = Path(FRAMES_DIR2_ABS)
 
-    # If path exists but is not a directory -> unrecoverable configuration error
-    if folder.exists() and (not folder.is_dir()):
-        print(f"ERROR: FRAMES_DIR_ABS exists but is not a directory: {folder}", file=sys.stderr)
-        raise SystemExit(1)
+    for folder, name in ((folder1, "FRAMES_DIR1_ABS"), (folder2, "FRAMES_DIR2_ABS")):
+        if folder.exists() and (not folder.is_dir()):
+            print(f"ERROR: {name} exists but is not a directory: {folder}", file=sys.stderr)
+            raise SystemExit(1)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            print(f"ERROR: cannot create/access {name} directory: {folder} ({e})", file=sys.stderr)
+            raise SystemExit(1)
 
-    # If directory does not exist -> create it and continue
-    try:
-        folder.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        print(f"ERROR: cannot create/access FRAMES_DIR_ABS directory: {folder} ({e})", file=sys.stderr)
-        raise SystemExit(1)
+    _bootstrap_folder(folder1, latest1)
+    _bootstrap_folder(folder2, latest2)
 
-    # Bootstrap: load newest existing frame (may be empty -> ok)
-    candidates = sorted(
-        (p for p in folder.iterdir() if p.is_file() and _is_candidate_image(p)),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if candidates:
-        jpeg = _try_load_as_jpeg_bytes(candidates[0])
-        if jpeg is not None:
-            _update_latest(jpeg, candidates[0])
-        prune_older_than_current(folder, candidates[0], MAX_FRAME_AGE_S)
-
-    app.state.folder = folder
-    app.state.observer = _start_watcher(folder)
+    app.state.folder1 = folder1
+    app.state.folder2 = folder2
+    app.state.observer1 = _start_watcher(folder1, latest1)
+    app.state.observer2 = _start_watcher(folder2, latest2)
 
 
 @app.on_event("shutdown")
 def _shutdown() -> None:
-    obs: Observer = app.state.observer
-    obs.stop()
-    obs.join()
+    obs1: Observer = app.state.observer1
+    obs2: Observer = app.state.observer2
+
+    obs1.stop()
+    obs2.stop()
+
+    obs1.join()
+    obs2.join()
 
 
-def _mjpeg_generator(target_fps: float) -> Generator[bytes, None, None]:
+def _mjpeg_generator(
+    target_fps: float,
+    folder: Path,
+    latest: LatestFrame,
+) -> Generator[bytes, None, None]:
     boundary = b"--frame\r\n"
     header_ct = b"Content-Type: image/jpeg\r\n"
     frame_interval = 1.0 / target_fps if target_fps > 0.0 else 0.05
 
-    # Periodic prune even if watchdog misses events
     prune_every_n: int = 20
     i: int = 0
 
@@ -291,17 +289,30 @@ def _mjpeg_generator(target_fps: float) -> Generator[bytes, None, None]:
 
         i += 1
         if (i % prune_every_n) == 0:
-            folder = getattr(app.state, "folder", None)
-            if folder is not None:
-                prune_older_than_current(folder, path, MAX_FRAME_AGE_S)
+            prune_older_than_current(folder, path, MAX_FRAME_AGE_S)
 
         time.sleep(frame_interval)
 
 
-@app.get("/stream")
-def stream() -> Response:
+@app.get("/stream/1")
+def stream1() -> Response:
+    folder1: Path = app.state.folder1
     return StreamingResponse(
-        _mjpeg_generator(TARGET_FPS),
+        _mjpeg_generator(TARGET_FPS, folder1, latest1),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@app.get("/stream/2")
+def stream2() -> Response:
+    folder2: Path = app.state.folder2
+    return StreamingResponse(
+        _mjpeg_generator(TARGET_FPS, folder2, latest2),
         media_type="multipart/x-mixed-replace; boundary=frame",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -318,10 +329,25 @@ def index() -> Response:
     <html>
       <head>
         <meta charset="utf-8">
-        <title>MJPEG Stream</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>MJPEG Streams (2 sources)</title>
       </head>
-      <body style="margin:0; background:#111; display:flex; align-items:center; justify-content:center; height:100vh;">
-        <img src="/stream" style="max-width:100vw; max-height:100vh;" />
+      <body style="margin:0; background:#111; color:#eee; font-family: sans-serif;">
+        <div style="display:flex; flex-direction:row; gap:8px; padding:8px; height:100vh; box-sizing:border-box;">
+          <div style="flex:1; display:flex; flex-direction:column; gap:6px; min-width:0;">
+            <div style="font-size:14px; opacity:0.85;">Stream 1</div>
+            <div style="flex:1; display:flex; align-items:center; justify-content:center; background:#000; border-radius:8px; overflow:hidden;">
+              <img src="/stream/1" style="max-width:100%; max-height:100%; object-fit:contain;" />
+            </div>
+          </div>
+
+          <div style="flex:1; display:flex; flex-direction:column; gap:6px; min-width:0;">
+            <div style="font-size:14px; opacity:0.85;">Stream 2</div>
+            <div style="flex:1; display:flex; align-items:center; justify-content:center; background:#000; border-radius:8px; overflow:hidden;">
+              <img src="/stream/2" style="max-width:100%; max-height:100%; object-fit:contain;" />
+            </div>
+          </div>
+        </div>
       </body>
     </html>
     """
