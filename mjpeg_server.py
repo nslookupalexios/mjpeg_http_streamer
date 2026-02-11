@@ -321,7 +321,6 @@ def stream2() -> Response:
         },
     )
 
-
 @app.get("/")
 def index() -> Response:
     html = """
@@ -334,16 +333,79 @@ def index() -> Response:
       </head>
       <body style="margin:0; background:#111; color:#eee; font-family: sans-serif;">
         <div style="display:flex; flex-direction:row; gap:8px; padding:8px; height:100vh; box-sizing:border-box;">
-          <div style="flex:1; display:flex; flex-direction:column; gap:6px; min-width:0;">
-            <div style="font-size:14px; opacity:0.85;">Stream 1</div>
-            <div style="flex:1; display:flex; align-items:center; justify-content:center; background:#000; border-radius:8px; overflow:hidden;">
+          
+          <!-- STREAM 1 -->
+          <div style="flex:1; display:flex; flex-direction:column; gap:10px; min-width:0;">
+            
+            <!-- Titolo migliorato -->
+            <div style="
+              display:flex; align-items:center; gap:10px;
+              padding:10px 14px;
+              border-radius:12px;
+              background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03));
+              border: 1px solid rgba(255,255,255,0.10);
+              box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+              min-width:0;
+            ">
+              <span style="
+                width:10px; height:10px; border-radius:999px;
+                background: rgba(16,185,129,0.95);
+                box-shadow: 0 0 0 3px rgba(16,185,129,0.18);
+                flex:0 0 auto;
+              "></span>
+
+              <span style="
+                font-size:22px;
+                font-weight:800;
+                letter-spacing:0.2px;
+                color:#f3f4f6;
+                line-height:1.2;
+                text-shadow: 0 1px 0 rgba(0,0,0,0.35);
+                white-space:normal;
+              ">
+                Identificazione di: persone, automobili, bici/motocicli, bus/camion, animali
+              </span>
+            </div>
+
+            <div style="flex:1; display:flex; align-items:center; justify-content:center; background:#000; border-radius:12px; overflow:hidden;">
               <img src="/stream/1" style="max-width:100%; max-height:100%; object-fit:contain;" />
             </div>
           </div>
 
-          <div style="flex:1; display:flex; flex-direction:column; gap:6px; min-width:0;">
-            <div style="font-size:14px; opacity:0.85;">Stream 2</div>
-            <div style="flex:1; display:flex; align-items:center; justify-content:center; background:#000; border-radius:8px; overflow:hidden;">
+          <!-- STREAM 2 -->
+          <div style="flex:1; display:flex; flex-direction:column; gap:10px; min-width:0;">
+            
+            <!-- Titolo migliorato -->
+            <div style="
+              display:flex; align-items:center; gap:10px;
+              padding:10px 14px;
+              border-radius:12px;
+              background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03));
+              border: 1px solid rgba(255,255,255,0.10);
+              box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+              min-width:0;
+            ">
+              <span style="
+                width:10px; height:10px; border-radius:999px;
+                background: rgba(99,102,241,0.95);
+                box-shadow: 0 0 0 3px rgba(99,102,241,0.18);
+                flex:0 0 auto;
+              "></span>
+
+              <span style="
+                font-size:22px;
+                font-weight:800;
+                letter-spacing:0.2px;
+                color:#f3f4f6;
+                line-height:1.2;
+                text-shadow: 0 1px 0 rgba(0,0,0,0.35);
+                white-space:normal;
+              ">
+                Identificazione di rocce
+              </span>
+            </div>
+
+            <div style="flex:1; display:flex; align-items:center; justify-content:center; background:#000; border-radius:12px; overflow:hidden;">
               <img src="/stream/2" style="max-width:100%; max-height:100%; object-fit:contain;" />
             </div>
           </div>
