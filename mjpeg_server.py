@@ -349,13 +349,13 @@ def index() -> Response:
             ">
               <span style="
                 width:10px; height:10px; border-radius:999px;
-                background: rgba(16,185,129,0.95);
-                box-shadow: 0 0 0 3px rgba(16,185,129,0.18);
+                background: rgba(255,0,0,0.95);
+                box-shadow: 0 0 0 3px rgba(255,0,0,0.18);
                 flex:0 0 auto;
               "></span>
 
               <span style="
-                font-size:22px;
+                font-size:18px;
                 font-weight:800;
                 letter-spacing:0.2px;
                 color:#f3f4f6;
@@ -387,13 +387,13 @@ def index() -> Response:
             ">
               <span style="
                 width:10px; height:10px; border-radius:999px;
-                background: rgba(99,102,241,0.95);
-                box-shadow: 0 0 0 3px rgba(99,102,241,0.18);
+                background: rgba(255,0,0,0.95);
+                box-shadow: 0 0 0 3px rgba(255,0,0,0.18);
                 flex:0 0 auto;
               "></span>
 
               <span style="
-                font-size:22px;
+                font-size:18px;
                 font-weight:800;
                 letter-spacing:0.2px;
                 color:#f3f4f6;
