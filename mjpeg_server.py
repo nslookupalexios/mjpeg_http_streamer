@@ -74,9 +74,10 @@ def _try_load_as_jpeg_bytes(path: Path, max_attempts: int = 5, sleep_s: float = 
                 img = img.convert("RGB")
 
             bio_out = BytesIO()
-            img.save(bio_out, format="JPEG", quality=85, optimize=True)
+            img.save(bio_out, format="JPEG", quality=85, optimize=False)
             return bio_out.getvalue()
         except Exception:
+            print("Warning: failed to load/validate image as JPEG, retrying...", file=sys.stderr)
             time.sleep(sleep_s)
 
     return None
